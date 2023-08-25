@@ -10,20 +10,30 @@
         static readonly string FileLayoutAct1 = @"..\Layout\1.bin";
         static readonly string FileLayoutAct2 = @"..\Layout\2.bin";
 
+        static readonly string FileChunksAct1 = "Act 1";
+        static readonly string FileChunksAct2 = "Act 2";
         static readonly string FileBlocksPrimary = @"..\Blocks\Primary";
         static readonly string FileBlocksAct1 = @"..\Blocks\Act 1 Secondary";
         static readonly string FileBlocksAct2 = @"..\Blocks\Act 2 Secondary";
-        static readonly string FileChunksAct1 = "Act 1";
-        static readonly string FileChunksAct2 = "Act 2";
-
-        static readonly byte[] ProtectedChunks = new byte[] { 0xA4, 0xA5, 0xA6, 0xA7 };
 
         static void Main()
         {
+            var chunksAct1 = ReadChunks(FileChunksAct1);
+            var chunksAct2 = ReadChunks(FileChunksAct2);
             var layoutAct1 = ReadLayout(FileLayoutAct1);
             var layoutAct2 = ReadLayout(FileLayoutAct2);
-            var chunksAct1 = ReadChunks(FileChunksAct1);
-            var chunksAct2 = ReadChunks(FileChunksAct1);
+
+            MarkUsedChunks(chunksAct1, layoutAct1);
+            MarkUsedChunks(chunksAct2, layoutAct2);
+            chunksAct2[0xA6].Used = true;
+            chunksAct2[0xA7].Used = true;
+        }
+
+        static void MarkUsedChunks(IList<ChunkInfo> chunks, LayoutInfo layout)
+        {
+            foreach (var row in layout.Rows)
+                foreach (var chunk in row.Chunks)
+                    chunks[chunk].Used = true;
         }
 
         static IList<ChunkInfo> ReadChunks(string filename)
@@ -123,23 +133,26 @@
         {
             public required IList<byte> Chunks { get; set; }
         }
+
+        public IEnumerable<LayoutRow> Rows => Foreground.Concat(Background);
     }
 
     internal class ChunkInfo
     {
         public required IList<byte> Definition { get; set; }
 
-        public byte Match { get; set; }
+        public boolean Used { get; set; }
 
         public MatchType MatchType { get; set; }
+
+        public byte Match { get; set; }
+
     }
 
     internal enum MatchType : byte
     {
-        Unknown,
+        None,
         Possible,
         Confirmed,
-        NoMatch,
-        Unused
     }
 }
