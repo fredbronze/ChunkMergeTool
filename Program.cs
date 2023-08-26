@@ -2,12 +2,16 @@
 {
     using System.Diagnostics;
     using System.Text;
+    using System.Text.Json;
 
     internal class Program
     {
         static readonly string WorkingDir = @"C:\Users\Fred\Documents\Git\s3unlocked\Levels\LBZ\Chunks";
+        static readonly string FileReport = @"report.txt";
         static readonly string FileLayoutAct1 = @"..\Layout\1.bin";
         static readonly string FileLayoutAct2 = @"..\Layout\2.bin";
+        static readonly string FileSolidsAct1 = @"..\Collision\1.bin";
+        static readonly string FileSolidsAct2 = @"..\Collision\2.bin";
 
         static readonly string FileChunksAct1 = "Act 1";
         static readonly string FileChunksAct2 = "Act 2";
@@ -17,18 +21,25 @@
 
         static void Main()
         {
+            var layoutAct1 = ReadLayout(FileLayoutAct1);
+            var layoutAct2 = ReadLayout(FileLayoutAct2);
+            var chunksAct1 = ReadChunks(FileChunksAct1);
+            var chunksAct2 = ReadChunks(FileChunksAct2);
+
             var blocksCommon = ReadBlocks(FileBlocksCommon);
             var blocksAct1 = blocksCommon.Concat(ReadBlocks(FileBlocksAct1)).ToList();
             var blocksAct2 = blocksCommon.Concat(ReadBlocks(FileBlocksAct2)).ToList();
-            var chunksAct1 = ReadChunks(FileChunksAct1);
-            var chunksAct2 = ReadChunks(FileChunksAct2);
-            var layoutAct1 = ReadLayout(FileLayoutAct1);
-            var layoutAct2 = ReadLayout(FileLayoutAct2);
+            ReadSolids(FileSolidsAct1, blocksAct1);
+            ReadSolids(FileSolidsAct1, blocksAct2);
 
-            MarkUsedChunks(chunksAct1, layoutAct1);
-            MarkUsedChunks(chunksAct2, layoutAct2);
             chunksAct2[0xA6].Used = true;
             chunksAct2[0xA7].Used = true;
+            MarkUsedChunks(chunksAct1, layoutAct1);
+            MarkUsedChunks(chunksAct2, layoutAct2);
+
+            BlankUnusedChunks(chunksAct1);
+            BlankUnusedChunks(chunksAct2);
+            var blocksMapping = Analyze(chunksAct1, chunksAct2, blocksCommon.Count);
         }
 
         static void MarkUsedChunks(IList<ChunkInfo> chunks, LayoutInfo layout)
@@ -38,13 +49,99 @@
                     chunks[chunk].Used = true;
         }
 
+        static void BlankUnusedChunks(IList<ChunkInfo> chunks)
+        {
+            var blankDefinition = chunks[0].Definition;
+            foreach (var chunk in chunks.Where(chunk => !chunk.Used))
+                chunk.Definition = blankDefinition;
+        }
+
+        static IList<int?> Analyze(IList<ChunkInfo> chunksAct1, IList<ChunkInfo> chunksAct2, int blocksCommonCount)
+        {
+            var path = Path.Combine(WorkingDir, FileReport);
+            var report = JsonSerializer.Deserialize<IList<Report>>(File.Exists(path) ? File.ReadAllText(path) : "[]");
+            var blocksMapping = new List<int?>(0x300);
+
+            for (var index = 0; index < blocksCommonCount; index++)
+                blocksMapping.Add(index);
+
+            for (var index = blocksMapping.Count; index < 0x300; index++)
+                blocksMapping.Add(null);
+
+            for (var chunkIndex1 = 1; chunkIndex1 < chunksAct1.Count; chunkIndex1++)
+            {
+                var chunk1 = chunksAct1[chunkIndex1];
+                if (!chunk1.Used) continue;
+                chunk1.Unique = true;
+
+                for (int chunkIndex2 = 0; chunkIndex2 < chunksAct2.Count; chunkIndex2++)
+                {
+                    var chunk2 = chunksAct2[chunkIndex2];
+                    var guesses = new Dictionary<int, int>();
+                    var match = true;
+
+                    for (var blockIndex = 0; blockIndex < 0x40; blockIndex++)
+                    {
+                        var block1 = chunk1.Definition[blockIndex];
+                        var block2 = chunk2.Definition[blockIndex];
+                        var expectedBlock2 = blocksMapping[blockIndex];
+
+                        if (block1.Id < blocksCommonCount)
+                        {
+                            if (block1.Id != block2.Id) { match = false; break; }
+                        }
+                        else if (expectedBlock2.HasValue)
+                        {
+                            if (expectedBlock2.GetValueOrDefault() != block2.Id) throw new Exception(
+                                $"Act 1 Chunk: {chunkIndex1:X}\r\n" +
+                                $"Act 2 Chunk: {chunkIndex2:X}\r\n" +
+                                $"Found block: {block2.Id:X}\r\n" +
+                                $"Expected block: {expectedBlock2:X}"
+                            );
+                        }
+                        else if (guesses.TryGetValue(block1.Id, out var guessedBlock2))
+                        {
+                            if (block2.Id != guessedBlock2) { match = false; break; }
+                        }
+                        else guesses.Add(block1.Id, block2.Id);
+                    }
+
+                    if (match)
+                    {
+                        chunk1.Unique = false;
+                        chunk1.Match = (byte)chunkIndex2;
+
+                        foreach (var guess in guesses)
+                            blocksMapping[guess.Key] = guess.Value;
+
+                        break;
+                    }
+                }
+
+                if (!chunk1.Unique)
+                    continue;
+
+                chunk1.Unique = true;
+            }
+
+            return blocksMapping;
+        }
+
+        static void ReadSolids(string filename, IList<BlockInfo> blocks)
+        {
+            var file = File.OpenRead(Path.Combine(WorkingDir, filename));
+
+            foreach (var block in blocks)
+                block.Solidity = ReadWord(file);
+        }
+
         static IList<BlockInfo> ReadBlocks(string filename)
         {
             var compressed = $"{filename}.bin";
             var uncompressed = $"{filename} unc.bin";
             ProcessKosFile(compressed, uncompressed, moduled: false, extract: true);
 
-            Thread.Sleep(1000);
+            Thread.Sleep(3000);
 
             var file = File.OpenRead(Path.Combine(WorkingDir, uncompressed));
             var list = new List<BlockInfo>();
@@ -70,7 +167,7 @@
             var uncompressed = $"{filename} unc.bin";
             ProcessKosFile(compressed, uncompressed, moduled: false, extract: true);
 
-            Thread.Sleep(1000);
+            Thread.Sleep(3000);
 
             var file = File.OpenRead(Path.Combine(WorkingDir, uncompressed));
             var list = new List<ChunkInfo>();
@@ -180,15 +277,26 @@
         }
     }
 
+    internal class Report
+    {
+        public int Id { get; set; }
+
+        public byte Match { get; set; }
+
+        public bool Confirmed { get; set; }
+    }
+
     internal class ChunkInfo
     {
         public IList<BlockRef> Definition { get; set; }
 
         public bool Used { get; set; }
 
-        public MatchType MatchType { get; set; }
+        public bool Unique { get; set; }
 
         public byte Match { get; set; }
+
+        public bool Confirmed { get; set; }
 
         public ChunkInfo(IList<BlockRef> definition)
         {
@@ -196,13 +304,6 @@
         }
 
         public IEnumerable<int> Words => Definition.Select(blockRef => blockRef.Word);
-    }
-
-    internal enum MatchType : byte
-    {
-        None,
-        Possible,
-        Confirmed,
     }
 
     internal class BlockRef
@@ -245,6 +346,8 @@
     internal class BlockInfo
     {
         IList<TileRef> Definition { get; set; }
+
+        public int Solidity { get; set; }
 
         public BlockInfo(IList<TileRef> definition)
         {
