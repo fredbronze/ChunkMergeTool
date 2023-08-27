@@ -1,6 +1,8 @@
 ﻿namespace ChunkMergeTool
 {
+    using System;
     using System.Diagnostics;
+    using System.Globalization;
     using System.Text;
     using System.Text.Json;
 
@@ -30,8 +32,9 @@
             var blocksAct1 = blocksCommon.Concat(ReadBlocks(FileBlocksAct1)).ToList();
             var blocksAct2 = blocksCommon.Concat(ReadBlocks(FileBlocksAct2)).ToList();
             ReadSolids(FileSolidsAct1, blocksAct1);
-            ReadSolids(FileSolidsAct1, blocksAct2);
+            ReadSolids(FileSolidsAct2, blocksAct2);
 
+            chunksAct1[0xDA].Used = true;
             chunksAct2[0xA6].Used = true;
             chunksAct2[0xA7].Used = true;
             MarkUsedChunks(chunksAct1, layoutAct1);
@@ -56,66 +59,108 @@
                 chunk.Definition = blankDefinition;
         }
 
-        static IList<int?> Analyze(IList<ChunkInfo> chunksAct1, IList<ChunkInfo> chunksAct2, int blocksCommonCount)
+        static IList<BlockMatch?> Analyze(IList<ChunkInfo> chunksAct1, IList<ChunkInfo> chunksAct2, int blocksCommonCount)
         {
+            var chunkIgnore = new Dictionary<int, IList<int>>();
             var path = Path.Combine(WorkingDir, FileReport);
-            var report = JsonSerializer.Deserialize<IList<Report>>(File.Exists(path) ? File.ReadAllText(path) : "[]");
-            var blocksMapping = new List<int?>(0x300);
 
-            for (var index = 0; index < blocksCommonCount; index++)
-                blocksMapping.Add(index);
-
-            for (var index = blocksMapping.Count; index < 0x300; index++)
-                blocksMapping.Add(null);
-
-            for (var chunkIndex1 = 1; chunkIndex1 < chunksAct1.Count; chunkIndex1++)
+            if (File.Exists(path))
             {
-                var chunk1 = chunksAct1[chunkIndex1];
+                var report = JsonSerializer.Deserialize<AnalysisReport>(File.ReadAllText(path))!;
+                foreach (var ignore in report.IgnoreChunks)
+                {
+                    var index1 = int.Parse(ignore.Chunk1, NumberStyles.HexNumber);
+                    var index2 = ignore.Chunk2?.Select(index => int.Parse(index, NumberStyles.HexNumber)).ToList();
+                    chunkIgnore.Add(index1, index2);
+                }
+            }
+
+            var blockMappings = new List<BlockMatch?>(0x300);
+            for (var index = 0; index < blocksCommonCount; index++)
+                blockMappings.Add(new BlockMatch(index));
+            for (var index = blockMappings.Count; index < 0x300; index++)
+                blockMappings.Add(null);
+
+            for (var index1 = 0; index1 < chunksAct1.Count; index1++)
+            {
+                if (chunkIgnore.TryGetValue(index1, out var ignore))
+                {
+                    if (ignore == null) continue;
+                }
+
+                var chunk1 = chunksAct1[index1];
                 if (!chunk1.Used) continue;
+                
                 chunk1.Unique = true;
 
-                for (int chunkIndex2 = 0; chunkIndex2 < chunksAct2.Count; chunkIndex2++)
+                for (int index2 = 1; index2 < chunksAct2.Count; index2++)
                 {
-                    var chunk2 = chunksAct2[chunkIndex2];
-                    var guesses = new Dictionary<int, int>();
+                    if (ignore != null && ignore.Contains(index2))
+                        continue;
+
+                    var chunk2 = chunksAct2[index2];
+                    var guessedMappings = new Dictionary<int, int>();
                     var match = true;
+                    var exact = true;
 
                     for (var blockIndex = 0; blockIndex < 0x40; blockIndex++)
                     {
                         var block1 = chunk1.Definition[blockIndex];
                         var block2 = chunk2.Definition[blockIndex];
-                        var expectedBlock2 = blocksMapping[blockIndex];
 
                         if (block1.Id < blocksCommonCount)
                         {
-                            if (block1.Id != block2.Id) { match = false; break; }
+                            if (block1.Id == block2.Id)
+                                continue;
+
+                            match = false;
+                            break;
                         }
-                        else if (expectedBlock2.HasValue)
+
+                        // TODO: use report
+                        exact = false;
+
+                        if (!guessedMappings.TryGetValue(block1.Id, out var guessedBlock2))
                         {
-                            if (expectedBlock2.GetValueOrDefault() != block2.Id) throw new Exception(
-                                $"Act 1 Chunk: {chunkIndex1:X}\r\n" +
-                                $"Act 2 Chunk: {chunkIndex2:X}\r\n" +
-                                $"Found block: {block2.Id:X}\r\n" +
-                                $"Expected block: {expectedBlock2:X}"
-                            );
+                            guessedMappings.Add(block1.Id, block2.Id);
                         }
-                        else if (guesses.TryGetValue(block1.Id, out var guessedBlock2))
+                        else if (block2.Id != guessedBlock2)
                         {
-                            if (block2.Id != guessedBlock2) { match = false; break; }
+                            match = false;
+                            break;
                         }
-                        else guesses.Add(block1.Id, block2.Id);
                     }
 
-                    if (match)
+                    if (!match)
+                        continue;
+
+                    for (var blockIndex = 0; blockIndex < 0x40; blockIndex++)
                     {
-                        chunk1.Unique = false;
-                        chunk1.Match = (byte)chunkIndex2;
+                        var block1 = chunk1.Definition[blockIndex];
+                        var block2 = chunk2.Definition[blockIndex];
+                        var expected = blockMappings[block1.Id];
 
-                        foreach (var guess in guesses)
-                            blocksMapping[guess.Key] = guess.Value;
+                        if (expected == null || expected.Id == block2.Id)
+                            continue;
 
-                        break;
+                        Console.WriteLine(
+                            $"Act 1 chunk: {index1:X}\r\n" +
+                            $"Act 2 chunk: {index2:X}\r\n" +
+                            $"Act 1 block: {block1.Id:X}\r\n" +
+                            $"Act 2 block: {block2.Id:X}\r\n" +
+                            $"Expected block: {expected.Id:X}\r\n" +
+                            (expected.Common ? "Block is part of primary set (shouldn't happen)" :
+                            $"Guess produced while mapping chunk {expected.Chunk1:X} to {expected.Chunk2:X}")
+                        );
                     }
+
+                    chunk1.Unique = false;
+                    chunk1.Match = (byte)index2;
+
+                    foreach (var m in guessedMappings)
+                        blockMappings[m.Key] = new BlockMatch(m.Value, (byte)index1, (byte)index2);
+
+                    break;
                 }
 
                 if (!chunk1.Unique)
@@ -124,7 +169,26 @@
                 chunk1.Unique = true;
             }
 
-            return blocksMapping;
+            using (var file = File.CreateText(path))
+            {
+                var report = new AnalysisReport
+                {
+                    IgnoreChunks = new List<ChunkIgnore>()
+                };
+
+                if (!chunkIgnore.Any())
+                    report.IgnoreChunks.Add(new ChunkIgnore(0, new List<int> { 0 }));
+
+                else foreach (var index1 in chunkIgnore.Keys)
+                {
+                    var ignore = chunkIgnore[index1];
+                    report.IgnoreChunks.Add(new ChunkIgnore(index1, ignore));
+                }
+
+                file.Write(JsonSerializer.Serialize(report, new JsonSerializerOptions { WriteIndented = true }));
+            }
+
+            return blockMappings;
         }
 
         static void ReadSolids(string filename, IList<BlockInfo> blocks)
@@ -277,15 +341,6 @@
         }
     }
 
-    internal class Report
-    {
-        public int Id { get; set; }
-
-        public byte Match { get; set; }
-
-        public bool Confirmed { get; set; }
-    }
-
     internal class ChunkInfo
     {
         public IList<BlockRef> Definition { get; set; }
@@ -385,4 +440,63 @@
             (XFlip ? 0x400 : 0) |
             Id;
     }
+
+    internal class AnalysisReport
+    {
+        public IList<ChunkIgnore> IgnoreChunks { get; set; }
+    }
+
+    internal class ChunkIgnore
+    {
+        public string Chunk1 { get; set; }
+
+        public IList<string>? Chunk2 { get; set; }
+
+#pragma warning disable CS8618
+        public ChunkIgnore()
+        {
+        }
+#pragma warning restore CS8618
+
+        public ChunkIgnore(int index1, IList<int> ignore)
+        {
+            Chunk1 = index1.ToString("X");
+            Chunk2 = ignore?.Select(index2 => index2.ToString("X")).ToList();
+        }
+    }
+
+    internal class ChunkMatch
+    {
+        public int Id { get; set; }
+
+        public byte Match { get; set; }
+
+        public bool Confirmed { get; set; }
+    }
+
+    internal class BlockMatch
+    {
+        public int Id { get; set; }
+
+        public byte Chunk1 { get; set; }
+
+        public byte Chunk2 { get; set; }
+
+        public bool Common { get; set; }
+
+        public BlockMatch(int id)
+        {
+            Id = id;
+            Common = true;
+        }
+
+        public BlockMatch(int id, byte chunk1, byte chunk2)
+        {
+            Id = id;
+            Chunk1 = chunk1;
+            Chunk2 = chunk2;
+        }
+    }
+
+
 }
