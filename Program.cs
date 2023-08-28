@@ -40,9 +40,12 @@
             MarkUsedChunks(chunksAct1, layoutAct1);
             MarkUsedChunks(chunksAct2, layoutAct2);
 
+            MarkDuplicateChunks(chunksAct1);
+            MarkDuplicateChunks(chunksAct2);
             BlankUnusedChunks(chunksAct1);
             BlankUnusedChunks(chunksAct2);
-            var blocksMapping = Analyze(chunksAct1, chunksAct2, blocksCommon.Count);
+
+            var blockMappings = Analyze(chunksAct1, chunksAct2, blocksCommon.Count);
         }
 
         static void MarkUsedChunks(IList<ChunkInfo> chunks, LayoutInfo layout)
@@ -52,6 +55,37 @@
                     chunks[chunk].Used = true;
         }
 
+        static void MarkDuplicateChunks(IList<ChunkInfo> chunks)
+        {
+            for (var index1 = 0; index1 < chunks.Count; index1++)
+            {
+                var chunk1 = chunks[index1];
+                if (chunk1.MatchType == MatchType.Duplicate) continue;
+
+                for (var index2 = 0; index2 < chunks.Count; index2++)
+                {
+                    if (index1 == index2) continue;
+                    var chunk2 = chunks[index2];
+                    var match = true;
+
+                    for (var blockIndex = 0; blockIndex < 0x40; blockIndex++)
+                    {
+                        if (chunk1.Definition[blockIndex].Word != chunk2.Definition[blockIndex].Word)
+                        {
+                            match = false;
+                            break;
+                        }
+                    }
+
+                    if (match)
+                    {
+                        chunk2.MatchType = MatchType.Duplicate;
+                        chunk2.Match = (byte)index1;
+                    }
+                }
+            }
+        }
+
         static void BlankUnusedChunks(IList<ChunkInfo> chunks)
         {
             var blankDefinition = chunks[0].Definition;
@@ -59,15 +93,15 @@
                 chunk.Definition = blankDefinition;
         }
 
-        static IList<BlockMatch?> Analyze(IList<ChunkInfo> chunksAct1, IList<ChunkInfo> chunksAct2, int blocksCommonCount)
+        static IList<BlockMapping?> Analyze(IList<ChunkInfo> chunksAct1, IList<ChunkInfo> chunksAct2, int blocksCommonCount)
         {
-            var chunkIgnore = new Dictionary<int, IList<int>>();
+            var chunkIgnore = new Dictionary<int, IList<int>?>();
             var path = Path.Combine(WorkingDir, FileReport);
 
-            if (File.Exists(path))
+            if (File.Exists(path) && File.ReadAllText(path) is { Length: > 0 } text)
             {
-                var report = JsonSerializer.Deserialize<AnalysisReport>(File.ReadAllText(path))!;
-                foreach (var ignore in report.IgnoreChunks)
+                var report = JsonSerializer.Deserialize<AnalysisReport>(text)!;
+                foreach (var ignore in report.IgnoreMatches)
                 {
                     var index1 = int.Parse(ignore.Chunk1, NumberStyles.HexNumber);
                     var index2 = ignore.Chunk2?.Select(index => int.Parse(index, NumberStyles.HexNumber)).ToList();
@@ -75,23 +109,21 @@
                 }
             }
 
-            var blockMappings = new List<BlockMatch?>(0x300);
+            var blockMappings = new List<BlockMapping?>(0x300);
             for (var index = 0; index < blocksCommonCount; index++)
-                blockMappings.Add(new BlockMatch(index));
+                blockMappings.Add(new BlockMapping(index));
             for (var index = blockMappings.Count; index < 0x300; index++)
                 blockMappings.Add(null);
 
+            var errors = false;
+
             for (var index1 = 0; index1 < chunksAct1.Count; index1++)
             {
-                if (chunkIgnore.TryGetValue(index1, out var ignore))
-                {
-                    if (ignore == null) continue;
-                }
+                if (chunkIgnore.TryGetValue(index1, out var ignore) && ignore == null)
+                    continue;
 
                 var chunk1 = chunksAct1[index1];
-                if (!chunk1.Used) continue;
-                
-                chunk1.Unique = true;
+                if (!chunk1.Used || chunk1.MatchType != MatchType.Unique) continue;
 
                 for (int index2 = 1; index2 < chunksAct2.Count; index2++)
                 {
@@ -99,9 +131,10 @@
                         continue;
 
                     var chunk2 = chunksAct2[index2];
+                    if (!chunk2.Used) continue;
+
                     var guessedMappings = new Dictionary<int, int>();
                     var match = true;
-                    var exact = true;
 
                     for (var blockIndex = 0; blockIndex < 0x40; blockIndex++)
                     {
@@ -116,9 +149,6 @@
                             match = false;
                             break;
                         }
-
-                        // TODO: use report
-                        exact = false;
 
                         if (!guessedMappings.TryGetValue(block1.Id, out var guessedBlock2))
                         {
@@ -152,40 +182,34 @@
                             (expected.Common ? "Block is part of primary set (shouldn't happen)" :
                             $"Guess produced while mapping chunk {expected.Chunk1:X} to {expected.Chunk2:X}")
                         );
+
+                        errors = true;
                     }
 
-                    chunk1.Unique = false;
+                    chunk1.MatchType = MatchType.Pending;
                     chunk1.Match = (byte)index2;
 
                     foreach (var m in guessedMappings)
-                        blockMappings[m.Key] = new BlockMatch(m.Value, (byte)index1, (byte)index2);
+                        blockMappings[m.Key] = new BlockMapping(m.Value, (byte)index1, (byte)index2);
 
                     break;
                 }
 
-                if (!chunk1.Unique)
+                if (chunk1.MatchType != MatchType.Unique)
                     continue;
-
-                chunk1.Unique = true;
             }
 
-            using (var file = File.CreateText(path))
+            var pendingAct1 = chunksAct1.Any(chunk => chunk.MatchType == MatchType.Pending);
+            var pendingAct2 = chunksAct2.Any(chunk => chunk.MatchType == MatchType.Pending);
+
+            if (pendingAct1 || pendingAct2 || errors)
             {
-                var report = new AnalysisReport
-                {
-                    IgnoreChunks = new List<ChunkIgnore>()
-                };
+                var report = new AnalysisReport(chunksAct1, chunksAct2, chunkIgnore);
 
-                if (!chunkIgnore.Any())
-                    report.IgnoreChunks.Add(new ChunkIgnore(0, new List<int> { 0 }));
-
-                else foreach (var index1 in chunkIgnore.Keys)
-                {
-                    var ignore = chunkIgnore[index1];
-                    report.IgnoreChunks.Add(new ChunkIgnore(index1, ignore));
-                }
-
+                using var file = File.CreateText(path);
                 file.Write(JsonSerializer.Serialize(report, new JsonSerializerOptions { WriteIndented = true }));
+
+                Console.WriteLine("Completed with errors; a report has been created.");
             }
 
             return blockMappings;
@@ -347,7 +371,7 @@
 
         public bool Used { get; set; }
 
-        public bool Unique { get; set; }
+        public MatchType MatchType { get; set; }
 
         public byte Match { get; set; }
 
@@ -359,6 +383,14 @@
         }
 
         public IEnumerable<int> Words => Definition.Select(blockRef => blockRef.Word);
+    }
+
+    internal enum MatchType
+    {
+        Unique,
+        Duplicate,
+        Pending,
+        Confirmed
     }
 
     internal class BlockRef
@@ -441,40 +473,7 @@
             Id;
     }
 
-    internal class AnalysisReport
-    {
-        public IList<ChunkIgnore> IgnoreChunks { get; set; }
-    }
-
-    internal class ChunkIgnore
-    {
-        public string Chunk1 { get; set; }
-
-        public IList<string>? Chunk2 { get; set; }
-
-#pragma warning disable CS8618
-        public ChunkIgnore()
-        {
-        }
-#pragma warning restore CS8618
-
-        public ChunkIgnore(int index1, IList<int> ignore)
-        {
-            Chunk1 = index1.ToString("X");
-            Chunk2 = ignore?.Select(index2 => index2.ToString("X")).ToList();
-        }
-    }
-
-    internal class ChunkMatch
-    {
-        public int Id { get; set; }
-
-        public byte Match { get; set; }
-
-        public bool Confirmed { get; set; }
-    }
-
-    internal class BlockMatch
+    internal class BlockMapping
     {
         public int Id { get; set; }
 
@@ -484,13 +483,13 @@
 
         public bool Common { get; set; }
 
-        public BlockMatch(int id)
+        public BlockMapping(int id)
         {
             Id = id;
             Common = true;
         }
 
-        public BlockMatch(int id, byte chunk1, byte chunk2)
+        public BlockMapping(int id, byte chunk1, byte chunk2)
         {
             Id = id;
             Chunk1 = chunk1;
@@ -498,5 +497,81 @@
         }
     }
 
+    internal class AnalysisReport
+    {
+        public IList<IList<string>> ConfirmMatches { get; set; }
+
+        public IList<IList<string>> DuplicatesAct1 { get; set; }
+
+        public IList<IList<string>> DuplicatesAct2 { get; set; }
+
+        public IList<IgnoreMatch> IgnoreMatches { get; set; }
+
+        public AnalysisReport(IList<ChunkInfo> chunksAct1, IList<ChunkInfo> chunksAct2, Dictionary<int, IList<int>?> chunkIgnore)
+        {
+            ConfirmMatches = chunksAct1
+                .Select((chunk, index) => (chunk, index))
+                .Where(match => match.chunk.MatchType == MatchType.Pending)
+                .Select(match => new List<string>
+                {
+                    match.index.ToString("X"),
+                    match.chunk.Match.ToString("X")
+                }
+                as IList<string>)
+                .ToList();
+            DuplicatesAct1 = CollectDuplicates(chunksAct1);
+            DuplicatesAct2 = CollectDuplicates(chunksAct2);
+            IgnoreMatches = new List<IgnoreMatch>();
+
+            if (!chunkIgnore.Any())
+                IgnoreMatches.Add(new IgnoreMatch(0, new List<int> { 0 }));
+
+            else foreach (var index1 in chunkIgnore.Keys)
+            {
+                var ignore = chunkIgnore[index1];
+                IgnoreMatches.Add(new IgnoreMatch(index1, ignore));
+            }
+        }
+
+#pragma warning disable CS8618
+        public AnalysisReport()
+        {
+        }
+#pragma warning restore CS8618
+
+        private static IList<IList<string>> CollectDuplicates(IList<ChunkInfo> chunks)
+        {
+            return chunks
+                .Select((chunk, index) => (chunk, index))
+                .Where(match => match.chunk.MatchType == MatchType.Duplicate)
+                .GroupBy(match => match.chunk.Match)
+                .OrderBy(group => group.Key)
+                .Select(group => group
+                    .Select(chunk => chunk.index)
+                    .Prepend(group.Key)
+                    .Select(index => index.ToString("X"))
+                    .ToList() as IList<string>)
+                .ToList();
+        }
+    }
+
+    internal class IgnoreMatch
+    {
+        public string Chunk1 { get; set; }
+
+        public IList<string>? Chunk2 { get; set; }
+
+        public IgnoreMatch(int index1, IList<int>? ignore)
+        {
+            Chunk1 = index1.ToString("X");
+            Chunk2 = ignore?.Select(index2 => index2.ToString("X")).ToList();
+        }
+
+#pragma warning disable CS8618
+        public IgnoreMatch()
+        {
+        }
+#pragma warning restore CS8618
+    }
 
 }
