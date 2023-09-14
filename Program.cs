@@ -20,6 +20,9 @@
         static readonly string FileBlocksCommon = @"..\Blocks\Primary";
         static readonly string FileBlocksAct1 = @"..\Blocks\Act 1 Secondary";
         static readonly string FileBlocksAct2 = @"..\Blocks\Act 2 Secondary";
+        static readonly string FileTilesCommon = @"..\Tiles\Primary";
+        static readonly string FileTilesAct1 = @"..\Tiles\Act 1 Secondary";
+        static readonly string FileTilesAct2 = @"..\Tiles\Act 2 Secondary";
 
         static void Main()
         {
@@ -34,6 +37,10 @@
             ReadSolids(FileSolidsAct1, blocksAct1);
             ReadSolids(FileSolidsAct2, blocksAct2);
 
+            var tilesCommon = ReadTiles(FileTilesCommon);
+            var tilesAct1 = tilesCommon.Concat(ReadTiles(FileTilesAct1)).ToList();
+            var tilesAct2 = tilesCommon.Concat(ReadTiles(FileTilesAct2)).ToList();
+
             chunksAct1[0xDA].Used = true;
             chunksAct2[0xA6].Used = true;
             chunksAct2[0xA7].Used = true;
@@ -46,6 +53,14 @@
             BlankUnusedChunks(chunksAct2);
 
             var blockMappings = Analyze(chunksAct1, chunksAct2, blocksCommon.Count);
+            var blockMatches = blockMappings?.Select((mapping, index) => new
+            {
+                BlockAct1 = index,
+                BlockAct2 = mapping?.Id ?? -1,
+                Mapping = mapping
+            })
+            .Where(block => block.BlockAct1 >= blocksCommon.Count && block.BlockAct2 >= 0)
+            .ToList();
         }
 
         static void MarkUsedChunks(IList<ChunkInfo> chunks, LayoutInfo layout)
@@ -93,9 +108,10 @@
                 chunk.Definition = blankDefinition;
         }
 
-        static IList<BlockMapping?> Analyze(IList<ChunkInfo> chunksAct1, IList<ChunkInfo> chunksAct2, int blocksCommonCount)
+        static IList<BlockMapping?>? Analyze(IList<ChunkInfo> chunksAct1, IList<ChunkInfo> chunksAct2, int blocksCommonCount)
         {
             var chunkIgnore = new Dictionary<int, IList<int>?>();
+            var chunkConfirm = new List<(int, int)>();
             var path = Path.Combine(WorkingDir, FileReport);
 
             if (File.Exists(path) && File.ReadAllText(path) is { Length: > 0 } text)
@@ -106,6 +122,13 @@
                     var index1 = int.Parse(ignore.Chunk1, NumberStyles.HexNumber);
                     var index2 = ignore.Chunk2?.Select(index => int.Parse(index, NumberStyles.HexNumber)).ToList();
                     chunkIgnore.Add(index1, index2);
+                }
+
+                foreach (var confirm in report.ConfirmMatches)
+                {
+                    var index1 = int.Parse(confirm[0], NumberStyles.HexNumber);
+                    var index2 = int.Parse(confirm[1], NumberStyles.HexNumber);
+                    chunkConfirm.Add((index1, index2));
                 }
             }
 
@@ -189,6 +212,9 @@
                     chunk1.MatchType = MatchType.Pending;
                     chunk1.Match = (byte)index2;
 
+                    if (chunkConfirm.Any(match => match.Item1 == index1 && match.Item2 == index2))
+                        chunk1.MatchType = MatchType.Confirmed;
+
                     foreach (var m in guessedMappings)
                         blockMappings[m.Key] = new BlockMapping(m.Value, (byte)index1, (byte)index2);
 
@@ -210,9 +236,31 @@
                 file.Write(JsonSerializer.Serialize(report, new JsonSerializerOptions { WriteIndented = true }));
 
                 Console.WriteLine("Completed with errors; a report has been created.");
+                return null;
             }
 
             return blockMappings;
+        }
+
+        static IList<IList<byte>> ReadTiles(string filename)
+        {
+            var compressed = $"{filename}.bin";
+            var uncompressed = $"{filename} unc.bin";
+            ProcessKosFile(compressed, uncompressed, moduled: true, extract: true);
+
+            Thread.Sleep(3000);
+
+            var file = File.OpenRead(Path.Combine(WorkingDir, uncompressed));
+            var list = new List<IList<byte>>();
+
+            while (file.Position != file.Length)
+            {
+                var bytes = new byte[0x20];
+                file.Read(bytes);
+                list.Add(bytes);
+            }
+
+            return list;
         }
 
         static void ReadSolids(string filename, IList<BlockInfo> blocks)
