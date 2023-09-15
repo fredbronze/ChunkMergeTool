@@ -55,9 +55,24 @@
             BlankUnusedChunks(chunksAct2);
 
             var blockMappings = AnalyzeChunks(chunksAct1, chunksAct2, blocksCommon.Count);
-            if (blockMappings == null) return;
+            if (blockMappings == null)
+            {
+                Console.WriteLine("Completed with errors; a report has been created.");
+                return;
+            }
 
             var blockConfirm = AnalyzeBlocks(blockMappings);
+            if (blockConfirm == null)
+            {
+                Console.WriteLine("Completed with errors; a report has been created.");
+                return;
+            }
+
+            if (!AnalyzeTiles(blockConfirm, blocksAct1, blocksAct2, tilesAct1, tilesAct2))
+            {
+                Console.WriteLine("Tile mismatch error");
+                return;
+            }
         }
 
         static void MarkUsedChunks(IList<ChunkInfo> chunks, LayoutInfo layout)
@@ -232,7 +247,6 @@
                 using var file = File.CreateText(path);
                 file.Write(JsonSerializer.Serialize(report, new JsonSerializerOptions { WriteIndented = true }));
 
-                Console.WriteLine("Completed with errors; a report has been created.");
                 return null;
             }
 
@@ -274,11 +288,123 @@
                 using var file = File.CreateText(path);
                 file.Write(JsonSerializer.Serialize(report, new JsonSerializerOptions { WriteIndented = true }));
 
-                Console.WriteLine("Completed with errors; a report has been created.");
-                // return null;
+                return null;
             }
 
             return blockConfirm;
+        }
+
+        static bool AnalyzeTiles(IList<BlockConfirmMatch> blockConfirm, IList<BlockInfo> blocksAct1, IList<BlockInfo> blocksAct2, IList<IList<byte>> tilesAct1, IList<IList<byte>> tilesAct2)
+        {
+            foreach (var match in blockConfirm)
+            {
+                var block1 = blocksAct1[match.Block1];
+                var block2 = blocksAct2[match.Block2];
+
+                if (!match.XFlip && !match.YFlip)
+                {
+                    if (!CompareTiles(block1.Definition[0], block2.Definition[0], tilesAct1, tilesAct2, false, false) ||
+                        !CompareTiles(block1.Definition[1], block2.Definition[1], tilesAct1, tilesAct2, false, false) ||
+                        !CompareTiles(block1.Definition[2], block2.Definition[2], tilesAct1, tilesAct2, false, false) ||
+                        !CompareTiles(block1.Definition[3], block2.Definition[3], tilesAct1, tilesAct2, false, false))
+                        return false;
+                }
+                else if (match.XFlip && !match.YFlip)
+                {
+                    if (!CompareTiles(block1.Definition[0], block2.Definition[1], tilesAct1, tilesAct2, true, false) ||
+                        !CompareTiles(block1.Definition[1], block2.Definition[0], tilesAct1, tilesAct2, true, false) ||
+                        !CompareTiles(block1.Definition[2], block2.Definition[3], tilesAct1, tilesAct2, true, false) ||
+                        !CompareTiles(block1.Definition[3], block2.Definition[2], tilesAct1, tilesAct2, true, false))
+                        return false;
+                }
+                else if (!match.XFlip && match.YFlip)
+                {
+                    if (!CompareTiles(block1.Definition[0], block2.Definition[2], tilesAct1, tilesAct2, false, true) ||
+                        !CompareTiles(block1.Definition[1], block2.Definition[3], tilesAct1, tilesAct2, false, true) ||
+                        !CompareTiles(block1.Definition[2], block2.Definition[0], tilesAct1, tilesAct2, false, true) ||
+                        !CompareTiles(block1.Definition[3], block2.Definition[1], tilesAct1, tilesAct2, false, true))
+                        return false;
+                }
+                else
+                {
+                    if (!CompareTiles(block1.Definition[0], block2.Definition[3], tilesAct1, tilesAct2, true, true) ||
+                        !CompareTiles(block1.Definition[1], block2.Definition[2], tilesAct1, tilesAct2, true, true) ||
+                        !CompareTiles(block1.Definition[2], block2.Definition[1], tilesAct1, tilesAct2, true, true) ||
+                        !CompareTiles(block1.Definition[3], block2.Definition[0], tilesAct1, tilesAct2, true, true))
+                        return false;
+                }
+            }
+
+            return true;
+        }
+
+        static bool CompareTiles(TileRef tileAct1, TileRef tileAct2, IList<IList<byte>> tilesAct1, IList<IList<byte>> tilesAct2, bool xFlip, bool yFlip)
+        {
+            var effectiveXFlip = xFlip ^ tileAct1.XFlip ^ tileAct2.XFlip;
+            var effectiveYFlip = yFlip ^ tileAct1.YFlip ^ tileAct2.YFlip;
+            IList<int> lookup;
+
+            if (!effectiveXFlip && !effectiveYFlip) lookup = new[]
+            {
+                0x00, 0x01, 0x02, 0x03,
+                0x04, 0x05, 0x06, 0x07,
+                0x08, 0x09, 0x0A, 0x0B,
+                0x0C, 0x0D, 0x0E, 0x0F,
+                0x10, 0x11, 0x12, 0x13,
+                0x14, 0x15, 0x16, 0x17,
+                0x18, 0x19, 0x1A, 0x1B,
+                0x1C, 0x1D, 0x1E, 0x1F,
+            };
+            else if (effectiveXFlip && !effectiveYFlip) lookup = new[]
+            {
+                0x03, 0x02, 0x01, 0x00, 
+                0x07, 0x06, 0x05, 0x04, 
+                0x0B, 0x0A, 0x09, 0x08, 
+                0x0F, 0x0E, 0x0D, 0x0C, 
+                0x13, 0x12, 0x11, 0x10, 
+                0x17, 0x16, 0x15, 0x14, 
+                0x1B, 0x1A, 0x19, 0x18, 
+                0x1F, 0x1E, 0x1D, 0x1C,
+            };
+            else if (!effectiveXFlip && effectiveYFlip) lookup = new[]
+            {
+                0x1C, 0x1D, 0x1E, 0x1F,
+                0x18, 0x19, 0x1A, 0x1B,
+                0x14, 0x15, 0x16, 0x17,
+                0x10, 0x11, 0x12, 0x13,
+                0x0C, 0x0D, 0x0E, 0x0F,
+                0x08, 0x09, 0x0A, 0x0B,
+                0x04, 0x05, 0x06, 0x07,
+                0x00, 0x01, 0x02, 0x03,
+            };
+            else lookup = new[]
+            {
+                0x1F, 0x1E, 0x1D, 0x1C,
+                0x1B, 0x1A, 0x19, 0x18,
+                0x17, 0x16, 0x15, 0x14,
+                0x13, 0x12, 0x11, 0x10,
+                0x0F, 0x0E, 0x0D, 0x0C,
+                0x0B, 0x0A, 0x09, 0x08,
+                0x07, 0x06, 0x05, 0x04,
+                0x03, 0x02, 0x01, 0x00,
+            };
+
+            var tile1 = tilesAct1[tileAct1.Id];
+            var tile2 = tilesAct2[tileAct2.Id];
+
+            for (var index = 0; index < 0x20; index++)
+            {
+                var byte1 = tile1[index];
+                var byte2 = tile2[lookup[index]];
+
+                if (effectiveXFlip)
+                    byte2 = (byte)(((byte2 & 0x0F) << 4) | ((byte2 & 0xF0) >> 4));
+
+                if (byte1 != byte2)
+                    return false;
+            }
+
+            return true;
         }
 
         static IList<IList<byte>> ReadTiles(string filename)
@@ -519,7 +645,7 @@
 
     internal class BlockInfo
     {
-        IList<TileRef> Definition { get; set; }
+        public IList<TileRef> Definition { get; set; }
 
         public int Solidity { get; set; }
 
